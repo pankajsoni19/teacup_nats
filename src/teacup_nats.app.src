@@ -5,7 +5,9 @@
   {applications,
    [kernel,
     stdlib,
-    teacup
+    teacup,
+    nats_msg,
+    jsx
    ]},
   {env,[]},
   {modules, []},
