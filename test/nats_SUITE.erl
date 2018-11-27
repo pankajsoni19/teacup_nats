@@ -18,7 +18,8 @@ all() ->
      sub_ok,
      sub_verbose_ok,
      unsub_verbose_ok,
-     auto_unsub_ok].
+     auto_unsub_ok,
+     double_sub_ok].
 
 init_per_testcase(_TestCase, Config) ->
     application:start(teacup),
@@ -189,3 +190,16 @@ auto_unsub_ok(_) ->
 
 sub_process(_Parent, C) ->
     ok = nats:sub(C, <<"foo.*">>).
+
+double_sub_ok(_) ->
+    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222, #{verbose => true}),
+    {SubPid, MonRef} = spawn_monitor(fun() -> double_sub_process(C) end),
+    receive {'DOWN', MonRef, process, SubPid, _} -> ok end,
+    {ok, CPid} = teacup:pid@(C),
+    State = sys:get_state(CPid),
+    #{key_to_sid := #{}, sid_to_key := #{}, monitor_to_sid := #{}} = State.
+
+double_sub_process(C) ->
+    ok = nats:sub(C, <<"foo.*">>),
+    ok = nats:sub(C, <<"foo.*">>),
+    timer:sleep(100).

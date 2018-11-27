@@ -318,7 +318,13 @@ do_pub(Subject, Opts, State) ->
     BinMsg = nats_msg:pub(Subject, ReplyTo, Payload),
     queue_msg(BinMsg, State).
 
-do_sub(Subject, Opts, Pid, #{next_sid := DefaultSid,
+do_sub(Subject, Opts, Pid, #{key_to_sid := KeyToSid} = State) ->
+    case maps:is_key({Subject, Pid}, KeyToSid) of
+        true -> {noreply, State};
+        false -> do_nats_sub(Subject, Opts, Pid, State)
+    end.
+
+do_nats_sub(Subject, Opts, Pid, #{next_sid := DefaultSid,
                              monitor_to_sid := MonitorToSid,
                              sid_to_key := SidToKey,
                              key_to_sid := KeyToSid} = State) ->
