@@ -170,7 +170,19 @@ teacup@info(batch_timeout, #{batch := Batch} = State) ->
 teacup@info(reconnect_timeout, #{reconnect_try := ReconnectTry} = State) ->
     NewState = State#{reconnect_try => ReconnectTry + 1},
     do_connect(),
-    {noreply, NewState}.
+    {noreply, NewState};
+
+teacup@info(
+    {'DOWN', MonRef, process, Pid, _Reason},
+    #{monitor_to_sid := MonitorToSid, sid_to_key := SidToKey} = State)
+->
+    case maps:get(MonRef, MonitorToSid) of
+        undefined ->
+            {noreply, State};
+        Sid ->
+            {Subject, Pid, _} = maps:get(Sid, SidToKey),
+            do_unsub(Subject, #{}, Pid, State)
+    end.
 
 %% == Internal
 
@@ -194,6 +206,7 @@ reset_state(State) ->
                 server_info => #{},
                 next_sid => 0,
                 sid_to_key => #{},
+                monitor_to_sid => #{},
                 key_to_sid => #{},
                 ready => false,
                 batch => [],
@@ -252,7 +265,7 @@ interp_message({msg, {Subject, Sid, ReplyTo, Payload}},
                  sid_to_key := SidToKey} = State) ->
     case maps:get(Sid, SidToKey, undefined) of
         undefined -> ok;
-        {_, Pid} ->
+        {_, Pid, _} ->
             Resp = {msg, Subject, ReplyTo, Payload},
             Pid ! {Ref, Resp}
     end,
@@ -305,20 +318,31 @@ do_pub(Subject, Opts, State) ->
     BinMsg = nats_msg:pub(Subject, ReplyTo, Payload),
     queue_msg(BinMsg, State).
 
-do_sub(Subject, Opts, Pid, #{next_sid := DefaultSid,
+do_sub(Subject, Opts, Pid, #{key_to_sid := KeyToSid} = State) ->
+    case maps:is_key({Subject, Pid}, KeyToSid) of
+        true -> {noreply, State};
+        false -> do_nats_sub(Subject, Opts, Pid, State)
+    end.
+
+do_nats_sub(Subject, Opts, Pid, #{next_sid := DefaultSid,
+                             monitor_to_sid := MonitorToSid,
                              sid_to_key := SidToKey,
                              key_to_sid := KeyToSid} = State) ->
+    MonRef = erlang:monitor(process, Pid),
     K = {Subject, Pid},
     Sid = maps:get(K, KeyToSid, integer_to_binary(DefaultSid)),
     NewKeyToSid = maps:put(K, Sid, KeyToSid),
-    NewSidToKey = maps:put(Sid, K, SidToKey),
+    NewSidToKey = maps:put(Sid, {Subject, Pid, MonRef}, SidToKey),
+    NewMonitorToSid = maps:put(MonRef, Sid, MonitorToSid),
     QueueGrp = maps:get(queue_group, Opts, undefined),
     BinMsg = nats_msg:sub(Subject, QueueGrp, Sid),
     queue_msg(BinMsg, State#{next_sid => DefaultSid + 1,
+                             monitor_to_sid => NewMonitorToSid,
                              sid_to_key => NewSidToKey,
                              key_to_sid => NewKeyToSid}).
 
 do_unsub(Subject, Opts, Pid, #{sid_to_key := SidToKey,
+                               monitor_to_sid := MonitorToSid,
                                key_to_sid := KeyToSid} = State) ->
     % Should we crash if Sid for Pid not found?
     K = {Subject, Pid},
@@ -329,13 +353,17 @@ do_unsub(Subject, Opts, Pid, #{sid_to_key := SidToKey,
         _ ->
             MaxMsgs = maps:get(max_messages, Opts, undefined),
             BinMsg = nats_msg:unsub(Sid, MaxMsgs),
+            {_, _, MonRef} = maps:get(Sid, SidToKey),
+            erlang:demonitor(MonRef, [flush]),
             % Only remove from maps if unconditional unsub.
             NewState =
                 case MaxMsgs of
                     undefined ->
                         NewKeyToSid = maps:remove(K, KeyToSid),
                         NewSidToKey = maps:remove(Sid, SidToKey),
+                        NewMonitorToSid = maps:remove(MonRef, MonitorToSid),
                         State#{sid_to_key => NewSidToKey,
+                               monitor_to_sid => NewMonitorToSid,
                                key_to_sid => NewKeyToSid};
                     _ ->
                         % How should we be able to cleanup in this case?
